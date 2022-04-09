@@ -10,6 +10,30 @@ sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
 # from https://util.unicode.org/UnicodeJsps/regex.jsp?a=%5Cp%7BBidi_Paired_Bracket_Type%3DClose%7D&b=.
 CLOSING_BRACKETS = frozenset(")]}༻༽᚜⁆⁾₎⌉⌋〉❩❫❭❯❱❳❵⟆⟧⟩⟫⟭⟯⦄⦆⦈⦊⦌⦎⦐⦒⦔⦖⦘⧙⧛⧽⸣⸥⸧⸩⹖⹘⹚⹜〉》」』】〕〗〙〛﹚﹜﹞）］｝｠｣")
 
+LRO = unicodedata.lookup("LEFT-TO-RIGHT OVERRIDE")
+RLO = unicodedata.lookup("RIGHT-TO-LEFT OVERRIDE")
+LRE = unicodedata.lookup("LEFT-TO-RIGHT EMBEDDING")
+RLE = unicodedata.lookup("RIGHT-TO-LEFT EMBEDDING")
+PDF = unicodedata.lookup("POP DIRECTIONAL FORMATTING")
+LRI = unicodedata.lookup("LEFT-TO-RIGHT ISOLATE")
+RLI = unicodedata.lookup("RIGHT-TO-LEFT ISOLATE")
+FSI = unicodedata.lookup("FIRST STRONG ISOLATE")
+PDI = unicodedata.lookup("POP DIRECTIONAL ISOLATE")
+
+EXPLICIT_FORMATTING = {
+  LRO : PDF,
+  RLO : PDF,
+  LRE : PDF,
+  RLE : PDF,
+  LRI : PDI,
+  RLI : PDI,
+  FSI : PDI,
+}
+
+POPS = frozenset(EXPLICIT_FORMATTING.values())
+
+LRM = unicodedata.lookup("LEFT-TO-RIGHT MARK")
+
 class Atom:
   def __init__(self, atom):
     self.text = atom
@@ -113,6 +137,7 @@ except:
   print(contents[:30], found_token)
   raise
 
+line_number = 1
 column = 0
 lrm_insertion_point = 0
 source_line = ""
@@ -120,6 +145,7 @@ key_line = ""
 last_strong_column = -1
 last_strong = None
 atom_boundaries_since_last_strong = 0
+explicit_formatting_stack = []
 
 def bidi_overview(s):
   result = ""
@@ -140,22 +166,46 @@ fixed_source = ""
 
 for token in tokens:
   for atom in token.atoms:
-    atom_boundaries_since_last_strong = 1
+    atom_boundaries_since_last_strong += 1
     for i, c in enumerate(atom.text):
-      bidi_class = unicodedata.bidirectional(c)
-
       if c == "\n":
         fixed_source += source_line + c
+        line_number += 1
         column = 0
         source_line = ""
         key_line = ""
         last_strong_column = -1
         last_strong = None
         atom_boundaries_since_last_strong = 0
+        explicit_formatting_stack = []
         continue
       column += 1
       source_line += c
       key_line += token.mnemonic if i in (0, len(atom.text) - 1) else "_"
+
+      if i == 0 and explicit_formatting_stack:
+        print("Unterminated explicit formatting at atom boundary (l. %s, c. %s)" %
+              (line_number, column))
+        print("Consider inserting the following:")
+        for push in reversed(explicit_formatting_stack):
+          print(unicodedata.name(EXPLICIT_FORMATTING[push]))
+        # Pretend that was done so we don’t repeat ourselves throughout the
+        # line.
+        explicit_formatting_stack = []
+
+      if c in EXPLICIT_FORMATTING:
+        explicit_formatting_stack.append(c)
+      if c in POPS:
+        if explicit_formatting_stack and c == EXPLICIT_FORMATTING[explicit_formatting_stack[-1]]:
+          explicit_formatting_stack.pop()
+        else:
+          print("%s does not match an initiator (l. %s, c. %s)" % (
+                    unicodedata.name(c), line_number, column))
+          if isinstance(token, Stringy):
+            print("Consider escaping")
+          elif isinstance(token, Comment):
+            print("Consider removing")
+      bidi_class = unicodedata.bidirectional(c)
 
       if (last_strong in ("R", "AL") and
           (bidi_class in ("EN", "AN", "R", "AL") or
@@ -169,7 +219,7 @@ for token in tokens:
         print(bidi_overview(source_line))
         print(key_line)
         if lrm_insertion_point >= last_strong_column:
-          fixed_source_line = source_line[:lrm_insertion_point] + "\u200E" + source_line[lrm_insertion_point:]
+          fixed_source_line = source_line[:lrm_insertion_point] + LRM + source_line[lrm_insertion_point:]
           fixed_key_line = key_line[:lrm_insertion_point] + " " + key_line[lrm_insertion_point:]
           print("Can be fixed by LRM insertion:")
           print(lrm_insertion_point * " " + "|")
